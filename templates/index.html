@@ -1,0 +1,243 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>GPS Telemetry + Sensors</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://unpkg.com/@phosphor-icons/web"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+
+    <style>
+        body { background-color: #0f172a; color: #e2e8f0; }
+        .card {
+            background: rgba(30, 41, 59, 0.7);
+            backdrop-filter: blur(10px);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+        }
+        #map { height: 350px; width: 100%; border-radius: 0.75rem; }
+        .status-dot { height: 10px; width: 10px; border-radius: 50%; display: inline-block; }
+        .status-active { background-color: #22c55e; box-shadow: 0 0 10px #22c55e; }
+        .status-inactive { background-color: #ef4444; }
+    </style>
+</head>
+<body class="min-h-screen p-6 font-sans">
+
+    <div class="max-w-6xl mx-auto space-y-6">
+        
+        <div class="flex justify-between items-center mb-6">
+            <div>
+                <h1 class="text-3xl font-bold bg-gradient-to-r from-blue-400 to-cyan-300 bg-clip-text text-transparent">
+                    <i class="ph ph-satellite-dish text-blue-400 mr-2"></i>GPS Telemetry
+                </h1>
+                <p class="text-xs text-slate-400 mt-1">Multi-Sensor Fusion (GPS + Accelerometer)</p>
+            </div>
+            <div class="flex items-center space-x-4">
+                <button onclick="speakLocation()" class="flex items-center space-x-2 bg-blue-600 hover:bg-blue-500 text-white px-4 py-2 rounded-full transition-colors">
+                    <i class="ph ph-microphone text-lg"></i>
+                    <span class="text-sm font-medium">Read Location</span>
+                </button>
+                <div class="flex items-center space-x-2 text-sm bg-slate-800 px-4 py-2 rounded-full border border-slate-700">
+                    <span id="connection-status" class="status-dot status-inactive"></span>
+                    <span id="status-text">Disconnected</span>
+                </div>
+            </div>
+        </div>
+
+        <div class="grid grid-cols-2 md:grid-cols-4 gap-4">
+            <div class="card p-4 rounded-xl">
+                <div class="flex justify-between mb-2"><span class="text-slate-400 text-xs">LATITUDE</span></div>
+                <div class="text-2xl font-mono font-bold" id="lat">--.-----</div>
+            </div>
+            <div class="card p-4 rounded-xl">
+                <div class="flex justify-between mb-2"><span class="text-slate-400 text-xs">LONGITUDE</span></div>
+                <div class="text-2xl font-mono font-bold" id="lon">--.-----</div>
+            </div>
+            <div class="card p-4 rounded-xl">
+                <div class="flex justify-between mb-2"><span class="text-slate-400 text-xs">G-FORCE</span></div>
+                <div class="text-2xl font-mono font-bold text-red-400"><span id="gforce">--</span><span class="text-sm ml-1">g</span></div>
+            </div>
+            <div class="card p-4 rounded-xl">
+                <div class="flex justify-between mb-2"><span class="text-slate-400 text-xs">SPEED</span></div>
+                <div class="text-2xl font-mono font-bold"><span id="speed">--</span><span class="text-sm ml-1">kts</span></div>
+            </div>
+        </div>
+
+        <div class="grid grid-cols-1 md:grid-cols-3 gap-6">
+            <div class="md:col-span-2 card p-1 rounded-xl">
+                <div id="map"></div>
+            </div>
+            <div class="card p-6 rounded-xl flex flex-col justify-center items-center text-center">
+                <i class="ph ph-planet text-6xl text-slate-700 mb-2"></i>
+                <div class="text-4xl font-bold" id="satellites">0</div>
+                <div class="text-slate-400 text-sm uppercase">Satellites</div>
+                <div class="text-xs font-mono text-slate-600 mt-4" id="timestamp">Waiting...</div>
+            </div>
+        </div>
+
+        <div class="card p-4 rounded-xl">
+            <div class="flex justify-between items-center mb-4">
+                <h3 class="text-lg font-bold text-slate-300">Live Telemetry Analysis</h3>
+                <div class="flex space-x-4 text-xs">
+                    <span class="text-blue-400">● Speed</span>
+                    <span class="text-purple-400">● Altitude</span>
+                    <span class="text-red-400">● G-Force</span>
+                </div>
+            </div>
+            <div class="relative h-64 w-full">
+                <canvas id="telemetryChart"></canvas>
+            </div>
+        </div>
+
+    </div>
+
+    <script>
+        // --- MAP & CHART SETUP ---
+        let map, marker, polyline, chart;
+        let firstFix = false;
+        let currentLat = 0, currentLon = 0;
+        
+        const darkStyle = [
+            { elementType: "geometry", stylers: [{ color: "#242f3e" }] },
+            { elementType: "labels.text.stroke", stylers: [{ color: "#242f3e" }] },
+            { elementType: "labels.text.fill", stylers: [{ color: "#746855" }] },
+            { featureType: "road", elementType: "geometry", stylers: [{ color: "#38414e" }] },
+            { featureType: "water", elementType: "geometry", stylers: [{ color: "#17263c" }] }
+        ];
+
+        function initMap() {
+            const startPos = { lat: 0, lng: 0 };
+            map = new google.maps.Map(document.getElementById("map"), {
+                zoom: 2, center: startPos, styles: darkStyle, disableDefaultUI: false, streetViewControl: false
+            });
+            marker = new google.maps.Marker({
+                position: startPos, map: map,
+                icon: { path: google.maps.SymbolPath.CIRCLE, scale: 7, fillColor: "#3b82f6", fillOpacity: 1, strokeColor: "white", strokeWeight: 2 }
+            });
+            polyline = new google.maps.Polyline({
+                path: [], geodesic: true, strokeColor: "#22c55e", strokeOpacity: 1.0, strokeWeight: 4, map: map
+            });
+            initChart(); 
+        }
+
+        function initChart() {
+            const ctx = document.getElementById('telemetryChart').getContext('2d');
+            chart = new Chart(ctx, {
+                type: 'line',
+                data: {
+                    labels: [], 
+                    datasets: [
+                        {
+                            label: 'Speed (kts)',
+                            borderColor: '#3b82f6', 
+                            data: [],
+                            tension: 0.4,
+                            yAxisID: 'y'
+                        }, 
+                        {
+                            label: 'Altitude (m)',
+                            borderColor: '#a855f7', 
+                            data: [],
+                            tension: 0.4,
+                            yAxisID: 'y' // Sharing axis for simplicity or use 'y1'
+                        },
+                        {
+                            label: 'G-Force (g)',
+                            borderColor: '#ef4444', // Red
+                            backgroundColor: 'rgba(239, 68, 68, 0.1)',
+                            data: [],
+                            tension: 0.1, // Sharper lines for impacts
+                            yAxisID: 'y1' // Separate axis for G-force (usually small numbers like 1.0)
+                        }
+                    ]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    scales: {
+                        x: { display: false },
+                        y: { 
+                            type: 'linear', display: true, position: 'left',
+                            grid: { color: 'rgba(255, 255, 255, 0.1)' },
+                            ticks: { color: '#94a3b8' }
+                        },
+                        y1: {
+                            type: 'linear', display: true, position: 'right',
+                            grid: { drawOnChartArea: false },
+                            ticks: { color: '#ef4444' },
+                            min: 0,
+                            max: 3 // Cap G-force graph for readability
+                        }
+                    },
+                    plugins: { legend: { display: false } }
+                }
+            });
+        }
+
+        async function fetchGPS() {
+            try {
+                const response = await fetch('/api/gps');
+                const data = await response.json();
+
+                document.getElementById('connection-status').className = "status-dot status-active";
+                document.getElementById('status-text').innerText = "Connected";
+                document.getElementById('lat').innerText = data.lat.toFixed(6);
+                document.getElementById('lon').innerText = data.lon.toFixed(6);
+                
+                // Show G-Force on Dashboard
+                const gVal = data.accel ? data.accel.toFixed(2) : "1.00";
+                document.getElementById('gforce').innerText = gVal;
+
+                document.getElementById('speed').innerText = data.speed || 0;
+                document.getElementById('satellites').innerText = data.num_sats || 0;
+                document.getElementById('timestamp').innerText = data.timestamp;
+
+                currentLat = data.lat; currentLon = data.lon;
+
+                if (data.lat !== 0) {
+                    const currentLatLng = { lat: data.lat, lng: data.lon };
+                    marker.setPosition(currentLatLng);
+                    const pathCoords = data.path.map(p => ({ lat: p.lat, lng: p.lng }));
+                    polyline.setPath(pathCoords);
+
+                    if (!firstFix) {
+                        map.setCenter(currentLatLng);
+                        map.setZoom(16);
+                        firstFix = true;
+                    }
+
+                    if (chart && data.path.length > 0) {
+                        const labels = data.path.map(p => p.time);
+                        const speedData = data.path.map(p => p.speed);
+                        const altData = data.path.map(p => p.alt);
+                        const accelData = data.path.map(p => p.accel); // New Data
+
+                        chart.data.labels = labels;
+                        chart.data.datasets[0].data = speedData;
+                        chart.data.datasets[1].data = altData;
+                        chart.data.datasets[2].data = accelData; // New Data
+                        chart.update('none'); 
+                    }
+                }
+
+            } catch (error) {
+                console.error(error);
+                document.getElementById('connection-status').className = "status-dot status-inactive";
+            }
+        }
+
+        function speakLocation() {
+            if ('speechSynthesis' in window) {
+                const text = (currentLat === 0) ? "No signal." : `Lat ${currentLat.toFixed(3)}, Lon ${currentLon.toFixed(3)}`;
+                window.speechSynthesis.speak(new SpeechSynthesisUtterance(text));
+            } else alert("Voice not supported.");
+        }
+
+        setInterval(fetchGPS, 1000);
+    </script>
+
+    <script async defer
+        src="https://maps.googleapis.com/maps/api/js?key=AIzaSyBnfoHNB6GPohtS2mJOrFcY8cDr9q1LFa0&callback=initMap">
+    </script>
+</body>
+</html>
